@@ -1,0 +1,196 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum UserRole {
+  GUEST
+  PLAYER
+  ADMIN
+}
+
+enum AccountStatus {
+  ACTIVE
+  RESTRICTED
+  SUSPENDED
+}
+
+enum GameMode {
+  PVP
+  AI
+}
+
+enum GameStatus {
+  WAITING
+  IN_PROGRESS
+  COMPLETED
+  ABANDONED
+}
+
+enum GameResult {
+  WHITE_WON
+  BLACK_WON
+  DRAW
+}
+
+enum TerminationReason {
+  CHECKMATE
+  STALEMATE
+  TIMEOUT
+  RESIGNATION
+  THREEFOLD_REPETITION
+  FIFTY_MOVE_RULE
+  INSUFFICIENT_MATERIAL
+  MUTUAL_AGREEMENT
+  ABANDONED
+}
+
+enum RoomVisibility {
+  PUBLIC
+  PRIVATE
+}
+
+enum RoomStatus {
+  WAITING
+  READY
+  IN_PROGRESS
+  FINISHED
+  CANCELLED
+}
+
+model User {
+  id                       String         @id @default(uuid())
+  username                 String         @unique
+  email                    String         @unique
+  passwordHash             String?
+  googleId                 String?        @unique
+  displayName              String?
+  bio                      String?
+  avatarUrl                String?
+  isEmailVerified          Boolean        @default(false)
+  emailVerificationCode    String?
+  emailVerificationExpires DateTime?
+  role                     UserRole       @default(PLAYER)
+  eloRating                Int            @default(1200)
+  accountStatus            AccountStatus  @default(ACTIVE)
+  createdAt                DateTime       @default(now())
+  updatedAt                DateTime       @updatedAt
+
+  whiteGames      Game[]          @relation("WhitePlayer")
+  blackGames      Game[]          @relation("BlackPlayer")
+  moves           Move[]
+  messages        Message[]
+  ratingHistories RatingHistory[]
+  hostedRooms     Room[]
+
+  @@index([eloRating(sort: Desc)])
+  @@index([username])
+  @@index([email])
+  @@index([googleId])
+}
+
+model Game {
+  id                String             @id @default(uuid())
+  whitePlayerId     String
+  blackPlayerId     String?
+  gameMode          GameMode           @default(PVP)
+  aiDifficulty      String?
+  status            GameStatus         @default(WAITING)
+  result            GameResult?
+  terminationReason TerminationReason?
+  initialTimeMs     Int                @default(300000)
+  incrementMs       Int                @default(0)
+  whiteRemainingMs  Int                @default(300000)
+  blackRemainingMs  Int                @default(300000)
+  currentTurn       String             @default("w")
+  currentFen        String             @default("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+  positionVersion   Int                @default(0)
+  startedAt         DateTime?
+  endedAt           DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  whitePlayer     User            @relation("WhitePlayer", fields: [whitePlayerId], references: [id], onDelete: Cascade)
+  blackPlayer     User?           @relation("BlackPlayer", fields: [blackPlayerId], references: [id], onDelete: SetNull)
+  moves           Move[]
+  messages        Message[]
+  ratingHistories RatingHistory[]
+  room            Room?
+
+  @@index([status])
+  @@index([whitePlayerId])
+  @@index([blackPlayerId])
+  @@index([createdAt(sort: Desc)])
+}
+
+model Move {
+  id               String   @id @default(uuid())
+  gameId           String
+  moveNumber       Int
+  ply              Int
+  playerId         String?
+  fromSquare       String
+  toSquare         String
+  promotion        String?
+  san              String
+  fenAfter         String
+  clockRemainingMs Int?
+  createdAt        DateTime @default(now())
+
+  game   Game  @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  player User? @relation(fields: [playerId], references: [id], onDelete: SetNull)
+
+  @@index([gameId, ply])
+}
+
+model Message {
+  id        String   @id @default(uuid())
+  gameId    String
+  senderId  String
+  content   String
+  createdAt DateTime @default(now())
+
+  game   Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  sender User @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([gameId, createdAt])
+}
+
+model RatingHistory {
+  id           String   @id @default(uuid())
+  userId       String
+  gameId       String
+  ratingBefore Int
+  ratingAfter  Int
+  ratingChange Int
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([gameId])
+}
+
+model Room {
+  id            String         @id @default(uuid())
+  roomCode      String         @unique
+  hostId        String
+  name          String         @default("Trận đấu cờ vua")
+  visibility    RoomVisibility @default(PUBLIC)
+  status        RoomStatus     @default(WAITING)
+  initialTimeMs Int            @default(300000)
+  incrementMs   Int            @default(0)
+  gameId        String?        @unique
+  createdAt     DateTime       @default(now())
+
+  host User  @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  game Game? @relation(fields: [gameId], references: [id], onDelete: SetNull)
+
+  @@index([visibility, status])
+  @@index([roomCode])
+}

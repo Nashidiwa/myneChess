@@ -1,0 +1,34 @@
+{
+  "name": "online-chess",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Online Chess Platform with Real-time Multiplayer and Custom Minimax AI",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=packages/shared && npm run build --workspace=apps/server && npm run build --workspace=apps/web",
+    "build:shared": "npm run build --workspace=packages/shared",
+    "build:server": "npm run build:shared && npm run db:generate && npm run build --workspace=apps/server",
+    "build:web": "npm run build:shared && npm run build --workspace=apps/web",
+    "start:server": "node apps/server/dist/server.js",
+    "dev:server": "npm run dev --workspace=apps/server",
+    "dev:web": "npm run dev --workspace=apps/web",
+    "test": "npm run test --workspace=apps/server",
+    "test:watch": "npm run test:watch --workspace=apps/server",
+    "test:coverage": "npm run test:coverage --workspace=apps/server",
+    "lint": "npm run lint --workspace=apps/server && npm run lint --workspace=apps/web",
+    "db:generate": "npm run db:generate --workspace=apps/server",
+    "db:migrate": "npm run db:migrate --workspace=apps/server",
+    "db:deploy": "prisma migrate deploy --schema=apps/server/prisma/schema.prisma",
+    "db:seed": "npm run db:seed --workspace=apps/server"
+  },
+  "devDependencies": {
+    "prisma": "^5.14.0",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.14.0"
+  }
+}
