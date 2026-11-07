@@ -23,15 +23,16 @@ export interface MoveValidationResult {
 
 export interface IChessRulesService {
   isValidMove(fen: string, from: string, to: string, promotion?: string): boolean;
-  applyMove(fen: string, from: string, to: string, promotion?: string): MoveValidationResult;
+  applyMove(fen: string, from: string, to: string, promotion?: string, fenHistory?: string[]): MoveValidationResult;
   getLegalMoves(fen: string, square?: string): Array<{ from: string; to: string; promotion?: string; san: string }>;
   isGameOver(fen: string): boolean;
-  getGameStatus(fen: string): {
+  getGameStatus(fen: string, fenHistory?: string[]): {
     isGameOver: boolean;
     result?: GameResultType | null;
     terminationReason?: TerminationReasonType | null;
   };
   validateFen(fen: string): boolean;
+  checkThreefoldRepetition(history: string[], currentFen: string): boolean;
 }
 
 export class ChessRulesService implements IChessRulesService {
@@ -42,6 +43,18 @@ export class ChessRulesService implements IChessRulesService {
     } catch {
       return false;
     }
+  }
+
+  checkThreefoldRepetition(history: string[], currentFen: string): boolean {
+    const targetBase = currentFen.split(' ').slice(0, 4).join(' ');
+    let count = 1; // current position counts as 1
+    for (const fen of history) {
+      if (fen.split(' ').slice(0, 4).join(' ') === targetBase) {
+        count++;
+        if (count >= 3) return true;
+      }
+    }
+    return false;
   }
 
   isValidMove(fen: string, from: string, to: string, promotion?: string): boolean {
@@ -58,7 +71,13 @@ export class ChessRulesService implements IChessRulesService {
     }
   }
 
-  applyMove(fen: string, from: string, to: string, promotion?: string): MoveValidationResult {
+  applyMove(
+    fen: string,
+    from: string,
+    to: string,
+    promotion?: string,
+    fenHistory?: string[]
+  ): MoveValidationResult {
     const chess = new Chess(fen);
     const move = chess.move({
       from,
@@ -70,13 +89,17 @@ export class ChessRulesService implements IChessRulesService {
       throw new Error(`Nước đi không hợp lệ: từ ${from} đến ${to}`);
     }
 
+    const fenAfter = chess.fen();
     const isCheck = chess.inCheck();
     const isCheckmate = chess.isCheckmate();
     const isStalemate = chess.isStalemate();
-    const isThreefold = chess.isThreefoldRepetition();
-    const isFifty = chess.isDraw() && !isStalemate && !isThreefold && !chess.isInsufficientMaterial();
+    const isThreefold =
+      (fenHistory && fenHistory.length > 0
+        ? this.checkThreefoldRepetition(fenHistory, fenAfter)
+        : false) || chess.isThreefoldRepetition();
     const isInsufficient = chess.isInsufficientMaterial();
-    const isDraw = chess.isDraw();
+    const isFifty = chess.isDraw() && !isStalemate && !isThreefold && !isInsufficient;
+    const isDraw = isStalemate || isThreefold || isFifty || isInsufficient || chess.isDraw();
 
     let result: GameResultType | null = null;
     let terminationReason: TerminationReasonType | null = null;
@@ -102,7 +125,7 @@ export class ChessRulesService implements IChessRulesService {
 
     return {
       isValid: true,
-      fenAfter: chess.fen(),
+      fenAfter,
       san: move.san,
       from: move.from,
       to: move.to,
@@ -137,12 +160,21 @@ export class ChessRulesService implements IChessRulesService {
     return chess.isGameOver();
   }
 
-  getGameStatus(fen: string): {
+  getGameStatus(fen: string, fenHistory?: string[]): {
     isGameOver: boolean;
     result?: GameResultType | null;
     terminationReason?: TerminationReasonType | null;
   } {
     const chess = new Chess(fen);
+    const isThreefold =
+      fenHistory && fenHistory.length > 0
+        ? this.checkThreefoldRepetition(fenHistory, fen)
+        : chess.isThreefoldRepetition();
+
+    if (isThreefold) {
+      return { isGameOver: true, result: 'DRAW', terminationReason: 'THREEFOLD_REPETITION' };
+    }
+
     if (!chess.isGameOver()) {
       return { isGameOver: false, result: null, terminationReason: null };
     }
@@ -156,10 +188,6 @@ export class ChessRulesService implements IChessRulesService {
 
     if (chess.isStalemate()) {
       return { isGameOver: true, result: 'DRAW', terminationReason: 'STALEMATE' };
-    }
-
-    if (chess.isThreefoldRepetition()) {
-      return { isGameOver: true, result: 'DRAW', terminationReason: 'THREEFOLD_REPETITION' };
     }
 
     if (chess.isInsufficientMaterial()) {

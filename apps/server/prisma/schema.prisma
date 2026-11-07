@@ -109,6 +109,9 @@ model Game {
   currentTurn       String             @default("w")
   currentFen        String             @default("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
   positionVersion   Int                @default(0)
+  lastMoveTimestamp BigInt?
+  fenHistory        String[]           @default([])
+  drawOfferedBy     String?
   startedAt         DateTime?
   endedAt           DateTime?
   createdAt         DateTime           @default(now())
@@ -177,20 +180,22 @@ model RatingHistory {
 }
 
 model Room {
-  id            String         @id @default(uuid())
-  roomCode      String         @unique
-  hostId        String
-  name          String         @default("Trận đấu cờ vua")
-  visibility    RoomVisibility @default(PUBLIC)
-  status        RoomStatus     @default(WAITING)
-  initialTimeMs Int            @default(300000)
-  incrementMs   Int            @default(0)
-  gameId        String?        @unique
-  createdAt     DateTime       @default(now())
+  id           String         @id @default(uuid())
+  roomCode     String         @unique
+  hostId       String
+  guestId      String?
+  gameId       String?        @unique
+  visibility   RoomVisibility @default(PUBLIC)
+  status       RoomStatus     @default(WAITING)
+  timeControl  Int            @default(300)
+  incrementSec Int            @default(0)
+  passwordHash String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
 
-  host User  @relation(fields: [hostId], references: [id], onDelete: Cascade)
-  game Game? @relation(fields: [gameId], references: [id], onDelete: SetNull)
+  host  User  @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  game  Game? @relation(fields: [gameId], references: [id], onDelete: SetNull)
 
-  @@index([visibility, status])
   @@index([roomCode])
+  @@index([status])
 }

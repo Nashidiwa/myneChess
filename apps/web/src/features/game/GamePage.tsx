@@ -234,7 +234,27 @@ export default function GamePage() {
       setIncomingDrawOffer(data.offeredBy);
     };
 
+    const handleMoveRejected = () => {
+      if (gameState?.currentFen) {
+        setBoardFen(gameState.currentFen);
+        localChessRef.current = new Chess(gameState.currentFen);
+      }
+    };
+
+    const handleSocketError = (err: any) => {
+      if (
+        err?.code === 'MOVE_ERROR' ||
+        err?.code === 'UNAUTHORIZED' ||
+        err?.message?.includes('nước đi') ||
+        err?.message?.includes('lượt')
+      ) {
+        handleMoveRejected();
+      }
+    };
+
     socket.on(SOCKET_EVENTS.MOVE_RESULT, handleMoveResult);
+    socket.on(SOCKET_EVENTS.MOVE_REJECTED, handleMoveRejected);
+    socket.on(SOCKET_EVENTS.ERROR, handleSocketError);
     socket.on(SOCKET_EVENTS.CLOCK_UPDATE, handleClockSync);
     socket.on(SOCKET_EVENTS.GAME_OVER, handleGameOver);
     socket.on(SOCKET_EVENTS.CHAT_MESSAGE, handleChatMessage);
@@ -242,6 +262,8 @@ export default function GamePage() {
 
     return () => {
       socket.off(SOCKET_EVENTS.MOVE_RESULT, handleMoveResult);
+      socket.off(SOCKET_EVENTS.MOVE_REJECTED, handleMoveRejected);
+      socket.off(SOCKET_EVENTS.ERROR, handleSocketError);
       socket.off(SOCKET_EVENTS.CLOCK_UPDATE, handleClockSync);
       socket.off(SOCKET_EVENTS.GAME_OVER, handleGameOver);
       socket.off(SOCKET_EVENTS.CHAT_MESSAGE, handleChatMessage);
@@ -290,13 +312,24 @@ export default function GamePage() {
       return false;
     }
 
-    socket.emit(SOCKET_EVENTS.MOVE, {
-      gameId,
-      from: sourceSquare,
-      to: targetSquare,
-      promotion: 'q',
-      expectedVersion: gameState?.positionVersion ?? 0,
-    });
+    socket.emit(
+      SOCKET_EVENTS.MOVE,
+      {
+        gameId,
+        from: sourceSquare,
+        to: targetSquare,
+        promotion: 'q',
+        expectedVersion: gameState?.positionVersion ?? 0,
+      },
+      (ack: any) => {
+        if (ack && !ack.success) {
+          if (gameState?.currentFen) {
+            setBoardFen(gameState.currentFen);
+            localChessRef.current = new Chess(gameState.currentFen);
+          }
+        }
+      }
+    );
 
     return true;
   };
@@ -334,6 +367,11 @@ export default function GamePage() {
     if (!gameId) return;
     socket.emit(SOCKET_EVENTS.DRAW_REJECT, { gameId });
     setIncomingDrawOffer(null);
+  };
+
+  const handleClaimTimeout = () => {
+    if (!gameId) return;
+    socket.emit(SOCKET_EVENTS.CLAIM_TIMEOUT, { gameId });
   };
 
   const formatClock = (ms: number) => {

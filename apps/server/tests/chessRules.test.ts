@@ -104,4 +104,54 @@ describe('Phase 4 - Chess Rules & Authoritative Engine Tests', () => {
     expect(status.result).toBe('DRAW');
     expect(status.terminationReason).toBe('INSUFFICIENT_MATERIAL');
   });
+
+  it('should detect threefold repetition draw using historical position hashes (Finding H-04)', () => {
+    // Sequence: 1. Nf3 Nf6 2. Ng1 Ng8 3. Nf3 Nf6 4. Ng1 Ng8
+    const history: string[] = [STARTING_FEN];
+    let currentFen = STARTING_FEN;
+
+    // 1. Nf3
+    let res = chessRulesService.applyMove(currentFen, 'g1', 'f3', undefined, history);
+    history.push(res.fenAfter);
+    currentFen = res.fenAfter;
+
+    // 1... Nf6
+    res = chessRulesService.applyMove(currentFen, 'g8', 'f6', undefined, history);
+    history.push(res.fenAfter);
+    currentFen = res.fenAfter;
+
+    // 2. Ng1 (repetition 2 of starting position)
+    res = chessRulesService.applyMove(currentFen, 'f3', 'g1', undefined, history);
+    history.push(res.fenAfter);
+    currentFen = res.fenAfter;
+
+    // 2... Ng8
+    res = chessRulesService.applyMove(currentFen, 'f6', 'g8', undefined, history);
+    history.push(res.fenAfter);
+    currentFen = res.fenAfter;
+    expect(res.isThreefoldRepetition).toBe(false);
+
+    // 3. Nf3
+    res = chessRulesService.applyMove(currentFen, 'g1', 'f3', undefined, history);
+    history.push(res.fenAfter);
+    currentFen = res.fenAfter;
+
+    // 3... Nf6
+    res = chessRulesService.applyMove(currentFen, 'g8', 'f6', undefined, history);
+    history.push(res.fenAfter);
+    currentFen = res.fenAfter;
+
+    // 4. Ng1
+    res = chessRulesService.applyMove(currentFen, 'f3', 'g1', undefined, history);
+    history.push(res.fenAfter);
+    currentFen = res.fenAfter;
+
+    // 4... Ng8 (3rd time reaching original starting position!)
+    res = chessRulesService.applyMove(currentFen, 'f6', 'g8', undefined, history);
+
+    expect(res.isThreefoldRepetition).toBe(true);
+    expect(res.isDraw).toBe(true);
+    expect(res.result).toBe('DRAW');
+    expect(res.terminationReason).toBe('THREEFOLD_REPETITION');
+  });
 });

@@ -51,14 +51,41 @@ export class GamesController {
   async makeMove(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { from, to, promotion, expectedVersion } = req.body;
+      let effectivePlayerId = req.user?.userId;
+
+      // In AI mode, allow guest human if game was created as guest
+      if (!effectivePlayerId) {
+        const game = await gameService.getGameState(req.params.id);
+        if (game.gameMode === 'AI') {
+          if (game.whitePlayerId === 'guest-human' && game.currentTurn === 'w') {
+            effectivePlayerId = 'guest-human';
+          } else if (game.blackPlayerId === 'guest-human' && game.currentTurn === 'b') {
+            effectivePlayerId = 'guest-human';
+          }
+        }
+      }
+
       const result = await gameService.makeMove({
         gameId: req.params.id,
-        playerId: req.user?.userId,
+        playerId: effectivePlayerId,
         from,
         to,
         promotion,
         expectedVersion,
       });
+      res.status(200).json({
+        success: true,
+        data: result.moveResult,
+        ratingChanges: result.ratingChanges,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async claimTimeout(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await gameService.claimTimeout(req.params.id, req.user?.userId);
       res.status(200).json({
         success: true,
         data: result.moveResult,

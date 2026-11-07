@@ -15,12 +15,14 @@ export const SOCKET_EVENTS = {
   MATCHMAKING_JOIN: 'MATCHMAKING_JOIN',
   MATCHMAKING_CANCEL: 'MATCHMAKING_CANCEL',
   REQUEST_GAME_STATE: 'REQUEST_GAME_STATE',
+  CLAIM_TIMEOUT: 'CLAIM_TIMEOUT',
 
   // Server to Client
   ROOM_JOINED: 'ROOM_JOINED',
   ROOM_UPDATED: 'ROOM_UPDATED',
   MATCH_FOUND: 'MATCH_FOUND',
   MOVE_RESULT: 'MOVE_RESULT',
+  MOVE_REJECTED: 'MOVE_REJECTED',
   GAME_STATE: 'GAME_STATE',
   GAME_OVER: 'GAME_OVER',
   CLOCK_UPDATE: 'CLOCK_UPDATE',
@@ -76,6 +78,10 @@ export interface MatchmakingJoinPayload {
 }
 
 export interface RequestGameStatePayload {
+  gameId: string;
+}
+
+export interface ClaimTimeoutPayload {
   gameId: string;
 }
 

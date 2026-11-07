@@ -79,7 +79,7 @@ describe('Phase 4 - Game Service & Authoritative State Tests', () => {
     expect(move2.moveResult.currentTurn).toBe('w');
   });
 
-  it('should reject stale moves with positionVersion mismatch', async () => {
+  it('should reject stale moves with positionVersion mismatch (Finding H-05)', async () => {
     const game = await gameService.createGame({
       whitePlayerId: whiteUserId,
       whitePlayerName: 'player_white',
@@ -113,7 +113,7 @@ describe('Phase 4 - Game Service & Authoritative State Tests', () => {
     ).rejects.toThrow('Trạng thái bàn cờ đã thay đổi');
   });
 
-  it('should reject moving when it is not the players turn', async () => {
+  it('should reject moving when it is not the players turn (Finding C-02)', async () => {
     const game = await gameService.createGame({
       whitePlayerId: whiteUserId,
       whitePlayerName: 'player_white',
@@ -136,6 +136,70 @@ describe('Phase 4 - Game Service & Authoritative State Tests', () => {
         expectedVersion: 0,
       })
     ).rejects.toThrow('Không phải lượt đi của bạn');
+  });
+
+  it('should reject moves with missing/nullish playerId in PVP mode (Finding C-02)', async () => {
+    const game = await gameService.createGame({
+      whitePlayerId: whiteUserId,
+      whitePlayerName: 'player_white',
+      whitePlayerRating: 1200,
+      blackPlayerId: blackUserId,
+      blackPlayerName: 'player_black',
+      blackPlayerRating: 1200,
+      gameMode: 'PVP',
+      initialTimeMs: 5 * 60 * 1000,
+      incrementMs: 0,
+    });
+
+    await expect(
+      gameService.makeMove({
+        gameId: game.id,
+        playerId: undefined,
+        from: 'e2',
+        to: 'e4',
+        expectedVersion: 0,
+      })
+    ).rejects.toThrow('Yêu cầu đăng nhập');
+  });
+
+  it('should reject claimTimeout when opponent still has remaining time (Finding C-03)', async () => {
+    const game = await gameService.createGame({
+      whitePlayerId: whiteUserId,
+      whitePlayerName: 'player_white',
+      whitePlayerRating: 1200,
+      blackPlayerId: blackUserId,
+      blackPlayerName: 'player_black',
+      blackPlayerRating: 1200,
+      gameMode: 'PVP',
+      initialTimeMs: 5 * 60 * 1000,
+      incrementMs: 0,
+    });
+
+    await expect(
+      gameService.claimTimeout(game.id, blackUserId)
+    ).rejects.toThrow('Đối thủ chưa hết thời gian');
+  });
+
+  it('should grant timeout win via claimTimeout when active player clock runs out (Finding C-03)', async () => {
+    const game = await gameService.createGame({
+      whitePlayerId: whiteUserId,
+      whitePlayerName: 'player_white',
+      whitePlayerRating: 1200,
+      blackPlayerId: blackUserId,
+      blackPlayerName: 'player_black',
+      blackPlayerRating: 1200,
+      gameMode: 'PVP',
+      initialTimeMs: 50, // 50ms
+      incrementMs: 0,
+    });
+
+    // Wait 100ms for clock to expire
+    await new Promise((r) => setTimeout(r, 100));
+
+    const timeoutRes = await gameService.claimTimeout(game.id, blackUserId);
+    expect(timeoutRes.moveResult.isGameOver).toBe(true);
+    expect(timeoutRes.moveResult.result).toBe('BLACK_WON');
+    expect(timeoutRes.moveResult.terminationReason).toBe('TIMEOUT');
   });
 
   it('should handle resignation and update ELO rating', async () => {

@@ -24,6 +24,14 @@ router.post('/:id/move', optionalAuthenticate, (req, res, next) =>
   gamesController.makeMove(req, res, next)
 );
 
+router.post('/:id/timeout', optionalAuthenticate, (req, res, next) =>
+  gamesController.claimTimeout(req, res, next)
+);
+
+router.post('/:id/claim-timeout', optionalAuthenticate, (req, res, next) =>
+  gamesController.claimTimeout(req, res, next)
+);
+
 router.post('/:id/resign', optionalAuthenticate, (req, res, next) =>
   gamesController.resign(req, res, next)
 );

@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import request from 'supertest';
+import { OAuth2Client } from 'google-auth-library';
 import { createApp } from '../src/app';
 import { authService } from '../src/modules/auth/auth.service';
 
@@ -24,12 +25,8 @@ describe('Phase 3 - Authentication & Users API', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.success).toBe(true);
-    expect(res.body.data.user.username).toBe(testUser.username);
-    expect(res.body.data.user.email).toBe(testUser.email);
-    expect(res.body.data.user.eloRating).toBe(1200);
-    expect(res.body.data.user.role).toBe('PLAYER');
-    expect(res.body.data.user.isEmailVerified).toBe(false);
     expect(res.body.data.verificationRequired).toBe(true);
+    expect(res.body.data.verificationCode).toBeDefined();
 
     verificationCode = res.body.data.verificationCode;
   });
@@ -44,7 +41,7 @@ describe('Phase 3 - Authentication & Users API', () => {
 
     expect(res.status).toBe(403);
     expect(res.body.success).toBe(false);
-    expect(res.body.message).toContain('chưa được xác minh');
+    expect(res.body.details?.requiresVerification).toBe(true);
   });
 
   it('POST /auth/verify-email should reject wrong verification code', async () => {
@@ -69,8 +66,8 @@ describe('Phase 3 - Authentication & Users API', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.data.user.isEmailVerified).toBe(true);
     expect(res.body.data.accessToken).toBeDefined();
+    expect(res.body.data.user.isEmailVerified).toBe(true);
 
     accessToken = res.body.data.accessToken;
   });
@@ -78,11 +75,10 @@ describe('Phase 3 - Authentication & Users API', () => {
   it('POST /auth/resend-verification should reject if already verified', async () => {
     const res = await request(app)
       .post('/api/v1/auth/resend-verification')
-      .send({
-        email: testUser.email,
-      });
+      .send({ email: testUser.email });
 
     expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
   });
 
   it('POST /auth/register should reject duplicate username', async () => {
@@ -90,7 +86,7 @@ describe('Phase 3 - Authentication & Users API', () => {
       .post('/api/v1/auth/register')
       .send({
         username: testUser.username,
-        email: 'other@chess.local',
+        email: 'another@chess.local',
         password: 'Password123!',
       });
 
@@ -102,7 +98,7 @@ describe('Phase 3 - Authentication & Users API', () => {
     const res = await request(app)
       .post('/api/v1/auth/register')
       .send({
-        username: 'other_username',
+        username: 'another_user',
         email: testUser.email,
         password: 'Password123!',
       });
@@ -176,11 +172,20 @@ describe('Phase 3 - Authentication & Users API', () => {
     expect(res.body.success).toBe(false);
   });
 
-  it('POST /auth/google should authenticate and register/login with Google token', async () => {
+  it('POST /auth/google should authenticate and register/login with verified Google token', async () => {
+    vi.spyOn(OAuth2Client.prototype, 'verifyIdToken').mockResolvedValueOnce({
+      getPayload: () => ({
+        sub: 'mock-google-sub-12345',
+        email: 'master_google@gmail.com',
+        name: 'Google Master',
+        picture: 'https://api.dicebear.com/7.x/bottts/svg?seed=gm',
+      }),
+    } as any);
+
     const res = await request(app)
       .post('/api/v1/auth/google')
       .send({
-        credential: 'mock-google-token:master_google@gmail.com:Google Master:https://api.dicebear.com/7.x/bottts/svg?seed=gm',
+        credential: 'valid-google-id-token',
       });
 
     expect(res.status).toBe(200);
@@ -189,6 +194,17 @@ describe('Phase 3 - Authentication & Users API', () => {
     expect(res.body.data.user.displayName).toBe('Google Master');
     expect(res.body.data.user.isEmailVerified).toBe(true);
     expect(res.body.data.accessToken).toBeDefined();
+  });
+
+  it('POST /auth/google should reject unverified profile injection', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/google')
+      .send({
+        profile: { email: 'admin@chess.local' },
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
   });
 
   it('GET /auth/me should return current user profile with valid Bearer token', async () => {

@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { IGameRepository, GameRecord } from './games.repository';
 import { MoveData, STARTING_FEN } from '@online-chess/shared';
 import { prisma, isDatabaseConnected } from '../../database/prisma';
+import { AppError } from '../../middleware/errorHandler';
 
 export class MemoryGameRepository implements IGameRepository {
   private games: Map<string, GameRecord> = new Map();
@@ -42,6 +43,7 @@ export class MemoryGameRepository implements IGameRepository {
       positionVersion: 0,
       drawOfferedBy: null,
       lastMoveTimestamp: Date.now(),
+      fenHistory: [STARTING_FEN],
       startedAt: now,
       endedAt: null,
       createdAt: now,
@@ -56,11 +58,16 @@ export class MemoryGameRepository implements IGameRepository {
     return this.games.get(id) || null;
   }
 
-  async update(id: string, data: Partial<GameRecord>): Promise<GameRecord> {
+  async update(id: string, data: Partial<GameRecord>, expectedVersion?: number): Promise<GameRecord> {
     const existing = this.games.get(id);
     if (!existing) {
       throw new Error(`Game ${id} not found`);
     }
+
+    if (expectedVersion !== undefined && existing.positionVersion !== expectedVersion) {
+      throw new AppError(409, 'Trạng thái bàn cờ đã thay đổi (Xung đột đồng thời)');
+    }
+
     const updated: GameRecord = {
       ...existing,
       ...data,
@@ -102,8 +109,6 @@ export class MemoryGameRepository implements IGameRepository {
 }
 
 export class PrismaGameRepository implements IGameRepository {
-  private lastMoveTimestamps: Map<string, number> = new Map();
-
   async create(data: {
     whitePlayerId: string;
     whitePlayerName: string;
@@ -117,6 +122,7 @@ export class PrismaGameRepository implements IGameRepository {
     incrementMs: number;
   }): Promise<GameRecord> {
     const now = new Date();
+    const nowTs = Date.now();
     const game = await prisma.game.create({
       data: {
         whitePlayerId: data.whitePlayerId,
@@ -131,6 +137,8 @@ export class PrismaGameRepository implements IGameRepository {
         currentTurn: 'w',
         currentFen: STARTING_FEN,
         positionVersion: 0,
+        lastMoveTimestamp: BigInt(nowTs),
+        fenHistory: [STARTING_FEN],
         startedAt: now,
       },
       include: {
@@ -138,8 +146,6 @@ export class PrismaGameRepository implements IGameRepository {
         blackPlayer: true,
       },
     });
-
-    this.lastMoveTimestamps.set(game.id, Date.now());
 
     return {
       id: game.id,
@@ -161,11 +167,13 @@ export class PrismaGameRepository implements IGameRepository {
       currentTurn: game.currentTurn as any,
       currentFen: game.currentFen,
       positionVersion: game.positionVersion,
+      drawOfferedBy: game.drawOfferedBy,
+      fenHistory: game.fenHistory || [STARTING_FEN],
       startedAt: game.startedAt,
       endedAt: game.endedAt,
       createdAt: game.createdAt,
       updatedAt: game.updatedAt,
-      lastMoveTimestamp: Date.now(),
+      lastMoveTimestamp: game.lastMoveTimestamp ? Number(game.lastMoveTimestamp) : nowTs,
     };
   }
 
@@ -199,32 +207,91 @@ export class PrismaGameRepository implements IGameRepository {
       currentTurn: game.currentTurn as any,
       currentFen: game.currentFen,
       positionVersion: game.positionVersion,
+      drawOfferedBy: game.drawOfferedBy,
+      fenHistory: game.fenHistory || [game.currentFen],
       startedAt: game.startedAt,
       endedAt: game.endedAt,
       createdAt: game.createdAt,
       updatedAt: game.updatedAt,
-      lastMoveTimestamp: this.lastMoveTimestamps.get(id) || game.updatedAt.getTime(),
+      lastMoveTimestamp: game.lastMoveTimestamp ? Number(game.lastMoveTimestamp) : game.updatedAt.getTime(),
     };
   }
 
-  async update(id: string, data: Partial<GameRecord>): Promise<GameRecord> {
-    if (data.lastMoveTimestamp) {
-      this.lastMoveTimestamps.set(id, data.lastMoveTimestamp);
+  async update(id: string, data: Partial<GameRecord>, expectedVersion?: number): Promise<GameRecord> {
+    const updateData: any = {
+      status: data.status as any,
+      result: data.result as any,
+      terminationReason: data.terminationReason as any,
+      currentFen: data.currentFen,
+      currentTurn: data.currentTurn,
+      positionVersion: data.positionVersion,
+      whiteRemainingMs: data.whiteRemainingMs,
+      blackRemainingMs: data.blackRemainingMs,
+      endedAt: data.endedAt,
+    };
+
+    if (data.lastMoveTimestamp !== undefined) {
+      updateData.lastMoveTimestamp = data.lastMoveTimestamp ? BigInt(data.lastMoveTimestamp) : null;
+    }
+    if (data.fenHistory !== undefined) {
+      updateData.fenHistory = data.fenHistory;
+    }
+    if (data.drawOfferedBy !== undefined) {
+      updateData.drawOfferedBy = data.drawOfferedBy;
+    }
+
+    if (expectedVersion !== undefined) {
+      // Optimistic concurrency Compare-And-Swap
+      const updateResult = await prisma.game.updateMany({
+        where: { id, positionVersion: expectedVersion },
+        data: updateData,
+      });
+
+      if (updateResult.count === 0) {
+        throw new AppError(409, 'Trạng thái bàn cờ đã thay đổi (Xung đột đồng thời)');
+      }
+
+      const updated = await prisma.game.findUniqueOrThrow({
+        where: { id },
+        include: {
+          whitePlayer: true,
+          blackPlayer: true,
+        },
+      });
+
+      return {
+        id: updated.id,
+        whitePlayerId: updated.whitePlayerId,
+        whitePlayerName: updated.whitePlayer.username,
+        whitePlayerRating: updated.whitePlayer.eloRating,
+        blackPlayerId: updated.blackPlayerId,
+        blackPlayerName: updated.blackPlayer ? updated.blackPlayer.username : 'StockAI',
+        blackPlayerRating: updated.blackPlayer ? updated.blackPlayer.eloRating : 1500,
+        gameMode: updated.gameMode as any,
+        aiDifficulty: updated.aiDifficulty,
+        status: updated.status as any,
+        result: updated.result as any,
+        terminationReason: updated.terminationReason as any,
+        initialTimeMs: updated.initialTimeMs,
+        incrementMs: updated.incrementMs,
+        whiteRemainingMs: updated.whiteRemainingMs,
+        blackRemainingMs: updated.blackRemainingMs,
+        currentTurn: updated.currentTurn as any,
+        currentFen: updated.currentFen,
+        positionVersion: updated.positionVersion,
+        drawOfferedBy: updated.drawOfferedBy,
+        fenHistory: updated.fenHistory || [updated.currentFen],
+        startedAt: updated.startedAt,
+        endedAt: updated.endedAt,
+        createdAt: updated.createdAt,
+        updatedAt: updated.updatedAt,
+        lastMoveTimestamp: updated.lastMoveTimestamp ? Number(updated.lastMoveTimestamp) : updated.updatedAt.getTime(),
+      };
     }
 
     const updated = await prisma.game.update({
       where: { id },
-      data: {
-        status: data.status as any,
-        result: data.result as any,
-        terminationReason: data.terminationReason as any,
-        currentFen: data.currentFen,
-        currentTurn: data.currentTurn,
-        positionVersion: data.positionVersion,
-        whiteRemainingMs: data.whiteRemainingMs,
-        blackRemainingMs: data.blackRemainingMs,
-        endedAt: data.endedAt,
-      },
+      data: updateData,
       include: {
         whitePlayer: true,
         blackPlayer: true,
@@ -251,11 +318,13 @@ export class PrismaGameRepository implements IGameRepository {
       currentTurn: updated.currentTurn as any,
       currentFen: updated.currentFen,
       positionVersion: updated.positionVersion,
+      drawOfferedBy: updated.drawOfferedBy,
+      fenHistory: updated.fenHistory || [updated.currentFen],
       startedAt: updated.startedAt,
       endedAt: updated.endedAt,
       createdAt: updated.createdAt,
       updatedAt: updated.updatedAt,
-      lastMoveTimestamp: this.lastMoveTimestamps.get(id) || updated.updatedAt.getTime(),
+      lastMoveTimestamp: updated.lastMoveTimestamp ? Number(updated.lastMoveTimestamp) : updated.updatedAt.getTime(),
     };
   }
 
@@ -353,10 +422,13 @@ export class PrismaGameRepository implements IGameRepository {
         currentTurn: g.currentTurn as any,
         currentFen: g.currentFen,
         positionVersion: g.positionVersion,
+        drawOfferedBy: g.drawOfferedBy,
+        fenHistory: g.fenHistory || [g.currentFen],
         startedAt: g.startedAt,
         endedAt: g.endedAt,
         createdAt: g.createdAt,
         updatedAt: g.updatedAt,
+        lastMoveTimestamp: g.lastMoveTimestamp ? Number(g.lastMoveTimestamp) : g.updatedAt.getTime(),
       })),
       total,
     };

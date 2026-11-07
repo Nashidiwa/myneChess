@@ -22,6 +22,7 @@ export interface GameRecord {
   positionVersion: number;
   drawOfferedBy?: string | null;
   lastMoveTimestamp?: number | null;
+  fenHistory?: string[];
   startedAt?: Date | null;
   endedAt?: Date | null;
   createdAt: Date;
@@ -42,7 +43,7 @@ export interface IGameRepository {
     incrementMs: number;
   }): Promise<GameRecord>;
   findById(id: string): Promise<GameRecord | null>;
-  update(id: string, data: Partial<GameRecord>): Promise<GameRecord>;
+  update(id: string, data: Partial<GameRecord>, expectedVersion?: number): Promise<GameRecord>;
   addMove(move: Omit<MoveData, 'id' | 'createdAt'>): Promise<MoveData>;
   getMovesByGameId(gameId: string): Promise<MoveData[]>;
   getUserGames(userId: string, skip?: number, take?: number): Promise<{ games: GameRecord[]; total: number }>;

@@ -37,17 +37,9 @@ export const googleAuthSchema = z
   .object({
     credential: z.string().optional(),
     accessToken: z.string().optional(),
-    profile: z
-      .object({
-        email: z.string().email(),
-        name: z.string().optional(),
-        picture: z.string().optional(),
-        sub: z.string().optional(),
-      })
-      .optional(),
   })
-  .refine((data) => !!(data.credential || data.accessToken || data.profile), {
-    message: 'Yêu cầu cung cấp dữ liệu xác thực từ Google OAuth',
+  .refine((data) => !!(data.credential || data.accessToken), {
+    message: 'Yêu cầu cung cấp dữ liệu xác thực từ Google OAuth (credential hoặc accessToken)',
   });
 
 export type GoogleAuthInput = z.infer<typeof googleAuthSchema>;

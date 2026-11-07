@@ -104,10 +104,9 @@ export default function GoogleLoginButton({
         console.warn('Could not fetch userinfo directly on client', e);
       }
 
-      // 2. Send token and profile to backend
+      // 2. Send verified token to backend
       const res = await api.post('/auth/google', {
         accessToken,
-        profile: googleProfile,
       });
 
       if (res.data.success && res.data.data) {

@@ -91,7 +91,7 @@ export class GameService {
       throw new AppError(400, 'Trận đấu không ở trạng thái đang diễn ra');
     }
 
-    // Version concurrency control
+    // Version concurrency control check
     if (game.positionVersion !== expectedVersion) {
       throw new AppError(
         409,
@@ -99,20 +99,27 @@ export class GameService {
       );
     }
 
-    // Verify player and turn
+    // Verify player and turn strictly (Finding C-02)
     const isWhiteTurn = game.currentTurn === 'w';
-    if (playerId) {
-      if (isWhiteTurn && game.whitePlayerId !== playerId) {
-        throw new AppError(403, 'Không phải lượt đi của bạn (Trắng đang đi)');
+    if (game.gameMode === 'PVP') {
+      if (!playerId) {
+        throw new AppError(401, 'Yêu cầu đăng nhập để thực hiện nước đi');
       }
-      if (!isWhiteTurn && game.blackPlayerId !== playerId) {
-        throw new AppError(403, 'Không phải lượt đi của bạn (Đen đang đi)');
+      const expectedPlayerId = isWhiteTurn ? game.whitePlayerId : game.blackPlayerId;
+      if (playerId !== expectedPlayerId) {
+        throw new AppError(403, 'Không phải lượt đi của bạn');
+      }
+    } else if (game.gameMode === 'AI') {
+      const expectedPlayerId = isWhiteTurn ? game.whitePlayerId : game.blackPlayerId;
+      if (playerId && playerId !== expectedPlayerId) {
+        throw new AppError(403, 'Không phải lượt đi của bạn');
       }
     }
 
-    // Authoritative Server Clock Calculation
+    // Authoritative Server Clock Calculation (Finding C-03 & H-06)
     const now = Date.now();
-    const elapsed = game.lastMoveTimestamp ? Math.max(0, now - game.lastMoveTimestamp) : 0;
+    const lastTs = game.lastMoveTimestamp || game.updatedAt.getTime();
+    const elapsed = Math.max(0, now - lastTs);
     let whiteRemaining = game.whiteRemainingMs;
     let blackRemaining = game.blackRemainingMs;
 
@@ -132,8 +139,9 @@ export class GameService {
       blackRemaining += game.incrementMs;
     }
 
-    // Validate and apply move through authoritative rules service
-    const moveValidation = chessRulesService.applyMove(game.currentFen, from, to, promotion);
+    // Validate and apply move through authoritative rules service with Threefold tracking (Finding H-04)
+    const currentHistory = game.fenHistory && game.fenHistory.length > 0 ? game.fenHistory : [game.currentFen];
+    const moveValidation = chessRulesService.applyMove(game.currentFen, from, to, promotion, currentHistory);
 
     const moves = await this.gameRepo.getMovesByGameId(gameId);
     const ply = moves.length + 1;
@@ -154,6 +162,7 @@ export class GameService {
 
     const isGameOver = moveValidation.isCheckmate || moveValidation.isDraw;
     const nextVersion = game.positionVersion + 1;
+    const updatedHistory = [...currentHistory, moveValidation.fenAfter];
 
     let ratingChanges: RatingChangeResult | undefined;
     if (isGameOver && game.gameMode === 'PVP' && game.blackPlayerId && moveValidation.result) {
@@ -165,19 +174,25 @@ export class GameService {
       );
     }
 
-    await this.gameRepo.update(gameId, {
-      currentFen: moveValidation.fenAfter,
-      currentTurn: moveValidation.nextTurn,
-      positionVersion: nextVersion,
-      whiteRemainingMs: whiteRemaining,
-      blackRemainingMs: blackRemaining,
-      lastMoveTimestamp: now,
-      drawOfferedBy: null, // clear any pending draw offer upon move
-      status: isGameOver ? 'COMPLETED' : 'IN_PROGRESS',
-      result: moveValidation.result,
-      terminationReason: moveValidation.terminationReason,
-      endedAt: isGameOver ? new Date() : null,
-    });
+    // Atomic Compare-And-Swap update (Finding H-05)
+    await this.gameRepo.update(
+      gameId,
+      {
+        currentFen: moveValidation.fenAfter,
+        currentTurn: moveValidation.nextTurn,
+        positionVersion: nextVersion,
+        whiteRemainingMs: whiteRemaining,
+        blackRemainingMs: blackRemaining,
+        lastMoveTimestamp: now,
+        fenHistory: updatedHistory,
+        drawOfferedBy: null, // clear any pending draw offer upon move
+        status: isGameOver ? 'COMPLETED' : 'IN_PROGRESS',
+        result: moveValidation.result,
+        terminationReason: moveValidation.terminationReason,
+        endedAt: isGameOver ? new Date() : null,
+      },
+      game.positionVersion
+    );
 
     return {
       moveResult: {
@@ -197,7 +212,46 @@ export class GameService {
     };
   }
 
-  private async handleTimeoutInternal(
+  async claimTimeout(
+    gameId: string,
+    claimantId?: string
+  ): Promise<{ moveResult: MoveResultPayload; ratingChanges?: RatingChangeResult }> {
+    const game = await this.gameRepo.findById(gameId);
+    if (!game) throw new AppError(404, 'Không tìm thấy trận đấu');
+    if (game.status !== 'IN_PROGRESS') {
+      throw new AppError(400, 'Trận đấu không ở trạng thái đang diễn ra');
+    }
+
+    if (claimantId && game.gameMode === 'PVP') {
+      if (game.whitePlayerId !== claimantId && game.blackPlayerId !== claimantId) {
+        throw new AppError(403, 'Bạn không tham gia trận đấu này');
+      }
+    }
+
+    const now = Date.now();
+    const lastTs = game.lastMoveTimestamp || game.updatedAt.getTime();
+    const elapsed = Math.max(0, now - lastTs);
+    const isWhite = game.currentTurn === 'w';
+    const activeRemaining = (isWhite ? game.whiteRemainingMs : game.blackRemainingMs) - elapsed;
+
+    if (activeRemaining > 0) {
+      throw new AppError(
+        400,
+        `Đối thủ chưa hết thời gian (${Math.ceil(activeRemaining / 1000)} giây còn lại)`
+      );
+    }
+
+    return this.handleTimeoutInternal(game, isWhite ? 'w' : 'b');
+  }
+
+  handleTimeoutInternal(
+    game: GameRecord,
+    timedOutColor: PieceColor
+  ): Promise<{ moveResult: MoveResultPayload; ratingChanges?: RatingChangeResult }> {
+    return this._executeTimeout(game, timedOutColor);
+  }
+
+  private async _executeTimeout(
     game: GameRecord,
     timedOutColor: PieceColor
   ): Promise<{ moveResult: MoveResultPayload; ratingChanges?: RatingChangeResult }> {

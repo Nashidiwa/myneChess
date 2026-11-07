@@ -1,6 +1,9 @@
 import { Chess, Move } from 'chess.js';
-import { AISearchStats, AIChessMove, AIDifficulty, PieceColor } from '@online-chess/shared';
+import { AISearchStats, AIChessMove, AIDifficulty } from '@online-chess/shared';
 import { logger } from '../../config/logger';
+import { Worker } from 'worker_threads';
+import path from 'path';
+import fs from 'fs';
 
 // Piece material values in centipawns
 const PIECE_VALUES: Record<string, number> = {
@@ -82,6 +85,7 @@ const KING_MIDGAME_PST = [
 
 export interface IChessAI {
   chooseMove(fen: string, difficulty?: AIDifficulty): Promise<AIChessMove>;
+  chooseMoveDirect(fen: string, difficulty?: AIDifficulty): Promise<AIChessMove>;
   evaluatePosition(chess: Chess): number;
   search(
     chess: Chess,
@@ -93,6 +97,49 @@ export interface IChessAI {
   ): number;
   orderMoves(chess: Chess, moves: Move[]): Move[];
   getSearchStatistics(): AISearchStats;
+}
+
+function executeInWorker(fen: string, difficulty: AIDifficulty): Promise<AIChessMove> {
+  return new Promise((resolve, reject) => {
+    const isTs = __filename.endsWith('.ts');
+    let workerPath = path.resolve(__dirname, isTs ? 'ai.worker.ts' : 'ai.worker.js');
+
+    if (!fs.existsSync(workerPath)) {
+      workerPath = path.resolve(__dirname, 'ai.worker.js');
+    }
+
+    const worker = new Worker(workerPath, {
+      execArgv: isTs ? ['--import', 'tsx'] : undefined,
+      workerData: { fen, difficulty },
+    });
+
+    const timeout = setTimeout(() => {
+      worker.terminate();
+      reject(new Error('AI worker search timed out'));
+    }, 10000);
+
+    worker.on('message', (res) => {
+      clearTimeout(timeout);
+      worker.terminate();
+      if (res?.success && res.move) {
+        resolve(res.move);
+      } else {
+        reject(new Error(res?.error || 'Worker error'));
+      }
+    });
+
+    worker.on('error', (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+
+    worker.on('exit', (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(`AI worker stopped with exit code ${code}`));
+      }
+    });
+  });
 }
 
 export class CustomChessAI implements IChessAI {
@@ -114,63 +161,97 @@ export class CustomChessAI implements IChessAI {
     return { ...this.stats };
   }
 
+  /**
+   * Optimized allocation-free position evaluation (Finding H-02).
+   * Parses FEN directly without allocating 8x8 arrays or piece objects.
+   */
   evaluatePosition(chess: Chess): number {
-    if (chess.isCheckmate()) {
-      // Current side is checkmated, disadvantage to current turn
-      return chess.turn() === 'w' ? -100000 : 100000;
-    }
-    if (chess.isDraw()) {
+    if (chess.inCheck()) {
+      const moves = chess.moves();
+      if (moves.length === 0) {
+        // Checkmate! Current side is mated
+        return chess.turn() === 'w' ? -100000 : 100000;
+      }
+    } else if (chess.isInsufficientMaterial()) {
       return 0;
     }
+
+    const fen = chess.fen();
+    const firstSpace = fen.indexOf(' ');
+    const placement = firstSpace !== -1 ? fen.slice(0, firstSpace) : fen;
 
     let whiteScore = 0;
     let blackScore = 0;
 
-    const board = chess.board();
+    let r = 0;
+    let c = 0;
 
-    for (let r = 0; r < 8; r++) {
-      for (let c = 0; c < 8; c++) {
-        const piece = board[r][c];
-        if (!piece) continue;
+    // Fixed column counts for doubled pawn evaluation
+    const whitePawnFiles = [0, 0, 0, 0, 0, 0, 0, 0];
+    const blackPawnFiles = [0, 0, 0, 0, 0, 0, 0, 0];
 
-        const squareIndex = r * 8 + c;
-        const mirroredIndex = (7 - r) * 8 + c;
-        const val = PIECE_VALUES[piece.type] || 0;
-
-        let pstVal = 0;
-        switch (piece.type) {
-          case 'p':
-            pstVal = piece.color === 'w' ? PAWN_PST[squareIndex] : PAWN_PST[mirroredIndex];
-            break;
-          case 'n':
-            pstVal = piece.color === 'w' ? KNIGHT_PST[squareIndex] : KNIGHT_PST[mirroredIndex];
-            break;
-          case 'b':
-            pstVal = piece.color === 'w' ? BISHOP_PST[squareIndex] : BISHOP_PST[mirroredIndex];
-            break;
-          case 'r':
-            pstVal = piece.color === 'w' ? ROOK_PST[squareIndex] : ROOK_PST[mirroredIndex];
-            break;
-          case 'q':
-            pstVal = piece.color === 'w' ? QUEEN_PST[squareIndex] : QUEEN_PST[mirroredIndex];
-            break;
-          case 'k':
-            pstVal = piece.color === 'w' ? KING_MIDGAME_PST[squareIndex] : KING_MIDGAME_PST[mirroredIndex];
-            break;
-        }
-
-        if (piece.color === 'w') {
-          whiteScore += val + pstVal;
-        } else {
-          blackScore += val + pstVal;
-        }
+    for (let i = 0; i < placement.length; i++) {
+      const ch = placement.charCodeAt(i);
+      if (ch === 47) {
+        // '/' character -> new rank
+        r++;
+        c = 0;
+        continue;
       }
+      if (ch >= 49 && ch <= 56) {
+        // '1' to '8' digits -> skip empty squares
+        c += ch - 48;
+        continue;
+      }
+
+      const isWhite = ch >= 65 && ch <= 90;
+      const type = isWhite ? String.fromCharCode(ch + 32) : placement[i];
+      const squareIndex = r * 8 + c;
+      const mirroredIndex = (7 - r) * 8 + c;
+      const val = PIECE_VALUES[type] || 0;
+
+      let pstVal = 0;
+      switch (type) {
+        case 'p':
+          pstVal = isWhite ? PAWN_PST[squareIndex] : PAWN_PST[mirroredIndex];
+          if (isWhite) whitePawnFiles[c]++;
+          else blackPawnFiles[c]++;
+          break;
+        case 'n':
+          pstVal = isWhite ? KNIGHT_PST[squareIndex] : KNIGHT_PST[mirroredIndex];
+          break;
+        case 'b':
+          pstVal = isWhite ? BISHOP_PST[squareIndex] : BISHOP_PST[mirroredIndex];
+          break;
+        case 'r':
+          pstVal = isWhite ? ROOK_PST[squareIndex] : ROOK_PST[mirroredIndex];
+          break;
+        case 'q':
+          pstVal = isWhite ? QUEEN_PST[squareIndex] : QUEEN_PST[mirroredIndex];
+          break;
+        case 'k':
+          pstVal = isWhite ? KING_MIDGAME_PST[squareIndex] : KING_MIDGAME_PST[mirroredIndex];
+          break;
+      }
+
+      if (isWhite) {
+        whiteScore += val + pstVal;
+      } else {
+        blackScore += val + pstVal;
+      }
+
+      c++;
     }
 
-    // Pawn structure evaluation: penalize doubled pawns
-    const doubledPawnsPenalty = this.evaluateDoubledPawns(board);
-    whiteScore -= doubledPawnsPenalty.white;
-    blackScore -= doubledPawnsPenalty.black;
+    // Penalize doubled pawns
+    for (let f = 0; f < 8; f++) {
+      if (whitePawnFiles[f] > 1) {
+        whiteScore -= (whitePawnFiles[f] - 1) * 20;
+      }
+      if (blackPawnFiles[f] > 1) {
+        blackScore -= (blackPawnFiles[f] - 1) * 20;
+      }
+    }
 
     // Check bonus
     if (chess.inCheck()) {
@@ -182,31 +263,6 @@ export class CustomChessAI implements IChessAI {
     }
 
     return whiteScore - blackScore;
-  }
-
-  private evaluateDoubledPawns(board: (any | null)[][]): { white: number; black: number } {
-    const whitePawnFiles = new Array(8).fill(0);
-    const blackPawnFiles = new Array(8).fill(0);
-
-    for (let r = 0; r < 8; r++) {
-      for (let c = 0; c < 8; c++) {
-        const p = board[r][c];
-        if (p && p.type === 'p') {
-          if (p.color === 'w') whitePawnFiles[c]++;
-          else blackPawnFiles[c]++;
-        }
-      }
-    }
-
-    let whitePenalty = 0;
-    let blackPenalty = 0;
-
-    for (let c = 0; c < 8; c++) {
-      if (whitePawnFiles[c] > 1) whitePenalty += (whitePawnFiles[c] - 1) * 20;
-      if (blackPawnFiles[c] > 1) blackPenalty += (blackPawnFiles[c] - 1) * 20;
-    }
-
-    return { white: whitePenalty, black: blackPenalty };
   }
 
   orderMoves(chess: Chess, moves: Move[]): Move[] {
@@ -238,6 +294,67 @@ export class CustomChessAI implements IChessAI {
     });
   }
 
+  /**
+   * Quiescence Search at depth 0 to eliminate horizon effect blunders (Finding H-03).
+   */
+  private quiescenceSearch(
+    chess: Chess,
+    alpha: number,
+    beta: number,
+    isMaximizing: boolean,
+    qDepth: number = 0
+  ): number {
+    this.stats.nodesVisited++;
+
+    if (this.isTimeout || qDepth >= 4) {
+      return this.evaluatePosition(chess);
+    }
+
+    const standPat = this.evaluatePosition(chess);
+
+    if (isMaximizing) {
+      if (standPat >= beta) return beta;
+      if (standPat > alpha) alpha = standPat;
+
+      const legalMoves = chess.moves({ verbose: true });
+      const captureMoves = legalMoves.filter((m) => !!m.captured || !!m.promotion);
+      if (captureMoves.length === 0) return standPat;
+
+      const orderedCaptures = this.orderMoves(chess, captureMoves);
+
+      for (const move of orderedCaptures) {
+        chess.move(move);
+        const score = this.quiescenceSearch(chess, alpha, beta, false, qDepth + 1);
+        chess.undo();
+
+        if (score >= beta) return beta;
+        if (score > alpha) alpha = score;
+        if (this.isTimeout) break;
+      }
+      return alpha;
+    } else {
+      if (standPat <= alpha) return alpha;
+      if (standPat < beta) beta = standPat;
+
+      const legalMoves = chess.moves({ verbose: true });
+      const captureMoves = legalMoves.filter((m) => !!m.captured || !!m.promotion);
+      if (captureMoves.length === 0) return standPat;
+
+      const orderedCaptures = this.orderMoves(chess, captureMoves);
+
+      for (const move of orderedCaptures) {
+        chess.move(move);
+        const score = this.quiescenceSearch(chess, alpha, beta, true, qDepth + 1);
+        chess.undo();
+
+        if (score <= alpha) return alpha;
+        if (score < beta) beta = score;
+        if (this.isTimeout) break;
+      }
+      return beta;
+    }
+  }
+
   search(
     chess: Chess,
     depth: number,
@@ -255,11 +372,24 @@ export class CustomChessAI implements IChessAI {
       }
     }
 
-    if (this.isTimeout || depth === 0 || chess.isGameOver()) {
+    if (this.isTimeout) {
       return this.evaluatePosition(chess);
     }
 
+    if (depth === 0) {
+      // Transition to Quiescence Search to resolve pending captures (Finding H-03)
+      return this.quiescenceSearch(chess, alpha, beta, isMaximizing, 0);
+    }
+
     const legalMoves = chess.moves({ verbose: true });
+
+    if (legalMoves.length === 0) {
+      if (chess.inCheck()) {
+        return isMaximizing ? -100000 + ply : 100000 - ply;
+      }
+      return 0; // Stalemate
+    }
+
     const orderedMoves = this.orderMoves(chess, legalMoves);
 
     if (isMaximizing) {
@@ -311,7 +441,7 @@ export class CustomChessAI implements IChessAI {
     }
   }
 
-  async chooseMove(fen: string, difficulty: AIDifficulty = 'MEDIUM'): Promise<AIChessMove> {
+  async chooseMoveDirect(fen: string, difficulty: AIDifficulty = 'MEDIUM'): Promise<AIChessMove> {
     const chess = new Chess(fen);
     const legalMoves = chess.moves({ verbose: true });
 
@@ -332,7 +462,7 @@ export class CustomChessAI implements IChessAI {
       case 'MEDIUM':
         depth = 3;
         timeLimit = 2500;
-        randomness = 0.05;
+        randomness = 0;
         break;
       case 'HARD':
         depth = 4;
@@ -376,7 +506,7 @@ export class CustomChessAI implements IChessAI {
 
     const isWhite = chess.turn() === 'w';
 
-    // Minimax search with Alpha-Beta pruning
+    // Minimax search with Alpha-Beta pruning & Quiescence search
     const bestScore = this.search(chess, depth, -Infinity, Infinity, isWhite, 0);
 
     const chosen = this.bestMoveAtRoot || legalMoves[0];
@@ -398,6 +528,20 @@ export class CustomChessAI implements IChessAI {
       score: bestScore,
       stats: this.stats,
     };
+  }
+
+  async chooseMove(fen: string, difficulty: AIDifficulty = 'MEDIUM'): Promise<AIChessMove> {
+    // If in vitest/test environment, direct execution is fastest and prevents IPC overhead
+    if (process.env.VITEST || process.env.NODE_ENV === 'test') {
+      return this.chooseMoveDirect(fen, difficulty);
+    }
+
+    try {
+      return await executeInWorker(fen, difficulty);
+    } catch (err) {
+      logger.warn(err, 'Worker thread failed for AI move, falling back to direct computation');
+      return this.chooseMoveDirect(fen, difficulty);
+    }
   }
 }
 
